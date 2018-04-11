@@ -55,9 +55,18 @@ struct lq_nl80211_data {
 	struct lq_nl80211_data *next; // Linked list pointer
 };
 
+struct lq_nl80211_vib{
+	unsigned char mac[ETHER_ADDR_LEN]; // MAC address of station
+	bool threshold_sw; 
+	struct lq_nl80211_vib *next;
+	int8_t cur_snr;
+	int8_t hop_flag;
+};
+
 void nl80211_link_info_init(void);
 void nl80211_link_info_cleanup(void);
 void nl80211_link_info_get(void);
+void free_lq_nl80211_vib(struct lq_nl80211_vib *vib_list);
 
 #endif // OLSR_LINUX_NL80211_LINK_INFO_H_INCLUDED
 

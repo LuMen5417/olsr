@@ -133,6 +133,7 @@ lq_ffeth_nl80211_handle_lqchange(void) {
       lq->lq.valueLq, lq->lq.valueNlq);
 #endif
 
+
     if (lq->smoothed_lq.valueLq < lq->lq.valueLq) {
       if (lq->lq.valueLq >= 254 || lq->lq.valueLq - lq->smoothed_lq.valueLq > lq->smoothed_lq.valueLq/10) {
         relevant = true;
@@ -323,7 +324,8 @@ lq_calc_cost_ffeth_nl80211(const void *ptr)
   bool ether;
   int lq_int, nlq_int;
 #ifdef LINUX_NL80211
-  fpm nl80211 = itofpm((int) lq->valueBandwidth + lq->valueRSSI);
+  //fpm nl80211 = itofpm((int) lq->valueBandwidth + lq->valueRSSI);
+  fpm nl80211 = itofpm((int) lq->valueRSSI);
 #endif
 
   // MINIMAL_USEFUL_LQ is a float, multiplying by 255 converts it to uint8_t
@@ -347,6 +349,7 @@ lq_calc_cost_ffeth_nl80211(const void *ptr)
   nl80211 = fpmidiv(nl80211, 255);
   cost = fpmidiv(itofpm(255 * 255), lq_int * nlq_int); // 1 / (LQ * NLQ)
   cost = fpmadd(cost, nl80211);
+  cost = (cost*cost)>>10;
 #else
   cost = fpmidiv(itofpm(255 * 255), lq_int * nlq_int); // 1 / (LQ * NLQ)
 #endif

@@ -45,7 +45,7 @@
 #include <stdlib.h>
 #include <stdbool.h>
 
-#include <net/if.h>
+//#include <net/if.h>
 #include <net/ethernet.h>
 #include <netinet/ether.h>
 #include <linux/nl80211.h>
@@ -95,6 +95,28 @@ struct nl80211_link_info_context {
 static int netlink_id = 0;
 static struct nl_sock *gen_netlink_socket = NULL; // Socket for NL80211
 static struct nl_sock *rt_netlink_socket = NULL; // Socket for ARP cache
+
+struct rtnl_neigh * my_rtnl_neigh_get(struct nl_cache *cache, int ifindex,
+                                      struct nl_addr *dst)
+{
+    struct rtnl_neigh *neigh;
+
+    neigh = (struct rtnl_neigh *)nl_cache_get_first (cache);
+    while (neigh) {
+        if (rtnl_neigh_get_ifindex (neigh) == ifindex) {
+            struct nl_addr *d;
+
+            d = rtnl_neigh_get_dst (neigh);
+            if (d && !nl_addr_cmp(d, dst)) {
+                nl_object_get((struct nl_object *) neigh);
+                return neigh;
+            }
+         }
+         neigh = (struct rtnl_neigh *)nl_cache_get_next ((struct nl_object *)neigh);
+    }
+    return NULL;
+}
+
 
 
 /**
@@ -286,6 +308,107 @@ static void nl80211_link_info_for_interface(struct interface_olsr *iface, struct
 	nlmsg_free(request_message);
 }
 
+static struct nlattr ** nl80211_parse(struct nl_msg *msg)
+{
+	struct genlmsghdr *gnlh = nlmsg_data(nlmsg_hdr(msg));
+	static struct nlattr *attr[NL80211_ATTR_MAX + 1];
+
+	nla_parse(attr, NL80211_ATTR_MAX, genlmsg_attrdata(gnlh, 0),
+	          genlmsg_attrlen(gnlh, 0), NULL);
+
+	return attr;
+}
+
+static int nl80211_get_noise_cb(struct nl_msg *msg, void *arg)
+{
+    int8_t *noise = arg;
+    struct nlattr **tb = nl80211_parse(msg);
+    struct nlattr *si[NL80211_SURVEY_INFO_MAX + 1];
+
+    static struct nla_policy sp[NL80211_SURVEY_INFO_MAX + 1] = {
+                  [NL80211_SURVEY_INFO_FREQUENCY] = { .type = NLA_U32 },
+                  [NL80211_SURVEY_INFO_NOISE]     = { .type = NLA_U8  },
+    };
+
+    if (!tb[NL80211_ATTR_SURVEY_INFO])
+        return NL_SKIP;
+
+    if (nla_parse_nested(si, NL80211_SURVEY_INFO_MAX,
+        tb[NL80211_ATTR_SURVEY_INFO], sp))
+        return NL_SKIP;
+
+    if (!si[NL80211_SURVEY_INFO_NOISE])
+        return NL_SKIP;
+
+    if (!*noise || si[NL80211_SURVEY_INFO_IN_USE])
+        *noise = (int8_t)nla_get_u8(si[NL80211_SURVEY_INFO_NOISE]);
+
+    return NL_SKIP;
+}
+
+/**
+ * Requests the NL80211 data for a specific interface.
+ *
+ * @param iface		Interface to get all the NL80211 station information for.
+ * @param nl80211	Pointer to linked list with station information. If set to NULL
+ *					the pointer will point to a new linked list, if there was any
+ *					information retreived.
+ */
+static void nl80211_link_noise_for_interface(struct interface_olsr *iface, int8_t *noise) {
+	int finish = 0;
+	struct nl_msg *request_message = NULL;
+	struct nl_cb *request_cb = NULL;
+
+	ASSERT_NOT_NULL(iface);
+
+	if (! iface->is_wireless) {
+		// Remove in production code
+		olsr_syslog(OLSR_LOG_INFO, "Link entry %s is not a wireless link", iface->int_name);
+		return;
+	}
+
+	if ((request_message = nlmsg_alloc()) == NULL) {
+		olsr_exit("Failed to allocate nl_msg struct", EXIT_FAILURE);
+	}
+
+	genlmsg_put(request_message, NL_AUTO_PID, NL_AUTO_SEQ, netlink_id, 0, NLM_F_DUMP, NL80211_CMD_GET_SURVEY, 0);
+
+	if (nla_put_u32(request_message, NL80211_ATTR_IFINDEX, iface->if_index) == -1) {
+		olsr_syslog(OLSR_LOG_ERR, "Failed to add interface index to netlink message");
+		exit(1);
+	}
+
+#ifdef NL_DEBUG
+	if ((request_cb = nl_cb_alloc(NL_CB_DEBUG)) == NULL) {
+#else
+	if ((request_cb = nl_cb_alloc(NL_CB_DEFAULT)) == NULL) {
+#endif
+		olsr_exit("Failed to alloc nl_cb struct", EXIT_FAILURE);
+	}
+
+	if (nl_cb_set(request_cb, NL_CB_VALID, NL_CB_CUSTOM, nl80211_get_noise_cb, noise) != 0) {
+		olsr_syslog(OLSR_LOG_ERR, "Failed to set netlink message callback");
+		exit(1);
+	}
+
+	nl_cb_err(request_cb, NL_CB_CUSTOM, error_handler, &finish);
+	nl_cb_set(request_cb, NL_CB_FINISH, NL_CB_CUSTOM, finish_handler, &finish);
+	nl_cb_set(request_cb, NL_CB_ACK, NL_CB_CUSTOM, ack_handler, &finish);
+
+	if (nl_send_auto_complete(gen_netlink_socket, request_message) < 0) {
+		olsr_syslog(OLSR_LOG_ERR, "Failed sending the request message with netlink");
+		exit(1);
+	}
+
+	while (! finish) {
+		nl_recvmsgs(gen_netlink_socket, request_cb);
+	}
+
+	nlmsg_free(request_message);
+}
+
+
+
 /**
  * Uses the linux ARP cache to find a MAC address for a neighbor. Does not do
  * actual ARP if it's not found in the cache.
@@ -326,7 +449,7 @@ static bool mac_of_neighbor(struct link_entry *link, unsigned char *mac) {
 		goto cleanup;
 	}
 
-	if ((neighbor = rtnl_neigh_get(cache, link->inter->if_index, neighbor_addr_filter)) == NULL) {
+	if ((neighbor = my_rtnl_neigh_get(cache, link->inter->if_index, neighbor_addr_filter)) == NULL) {
 		olsr_syslog(OLSR_LOG_INFO, "Neighbor MAC address not found in ARP cache");
 		goto cleanup;
 	}
@@ -369,6 +492,16 @@ static void free_lq_nl80211_data(struct lq_nl80211_data *nl80211) {
 		nl80211 = next;	
 	}
 }
+
+void free_lq_nl80211_vib(struct lq_nl80211_vib *nl80211) {
+	struct lq_nl80211_vib *next = nl80211;
+	while (nl80211) {
+		next = nl80211->next;
+		free(nl80211);
+		nl80211 = next;	
+	}
+}
+
 
 /**
  * Find a object in the linked list that matches the MAC address.
@@ -423,7 +556,7 @@ static uint8_t signal_to_quality(int8_t signal) {
 	};
 	// Must be ordered
 	static struct signal_penalty signal_quality_table[] = {
-		{ -75, 30 }, { -80, 60}, { -85, 120 }, { -90, 160 }, { -95, 200 }, { -100, 255 }
+		{ -75, 30 }, { -80, 255}, { -85, 255 }, { -90, 255}, { -95, 255 }, { -100, 255 }
 	};
 	static size_t TABLE_SIZE = sizeof(signal_quality_table) / sizeof(struct signal_penalty);
 
@@ -432,6 +565,110 @@ static uint8_t signal_to_quality(int8_t signal) {
 	for (i = 0; i < TABLE_SIZE; i++) {
 		if (signal <= signal_quality_table[i].signal) {
 			penalty = signal_quality_table[i].penalty;
+		} else {
+			break;
+		}
+	}
+
+	return penalty;
+}
+
+static struct lq_nl80211_vib *find_lq_nl80211_vib_by_mac(struct lq_nl80211_vib **lq_vib_list, struct lq_nl80211_data *lq_data) {
+	ASSERT_NOT_NULL(lq_data);
+	struct lq_nl80211_vib *tmp_list;
+	struct lq_nl80211_vib *lq_vib_data = NULL; 
+    
+	tmp_list = *lq_vib_list;
+	while (tmp_list) {
+		if (memcmp(lq_data->mac, tmp_list->mac, ETHER_ADDR_LEN) == 0) {
+			//olsr_syslog(OLSR_LOG_ERR,"olsr info compare ok");
+			return tmp_list;
+		}
+		tmp_list = tmp_list->next;
+	}
+
+	lq_vib_data = olsr_malloc(sizeof(struct lq_nl80211_vib),"new lq_nl80211_vib struct");
+	memcpy(lq_vib_data->mac,lq_data->mac,ETHER_ADDR_LEN);
+	lq_vib_data->threshold_sw = false;
+	lq_vib_data->next = NULL;
+	lq_vib_data->cur_snr = 0;
+	lq_vib_data->hop_flag = 0; 
+    
+	if(*lq_vib_list == NULL){
+		*lq_vib_list = lq_vib_data;
+	}else{
+		lq_vib_data->next = *lq_vib_list;
+		*lq_vib_list = lq_vib_data;
+	}
+
+	return lq_vib_data;
+}
+
+struct lq_nl80211_vib *lq_vib_list=NULL;
+#define THRESHOLD_VIB 10
+
+static uint8_t snr_to_quality(struct lq_nl80211_data *lq_data, int8_t signal,int8_t noise) {
+	//int8_t snr = signal - noise;
+	int8_t snr = signal;
+	struct lq_nl80211_vib *lq_vib_data=NULL;
+	
+	// Map dBm levels to quality penalties
+	struct signal_penalty {
+		int8_t signal;
+		uint8_t penalty; // 255=1.0
+	};
+	// Must be ordered
+	static struct signal_penalty signal_quality_table[] = {
+		{ 20, 120 }, { 15, 200 }, { 10, 240 }, {5, 255}
+	};
+	static size_t TABLE_SIZE = sizeof(signal_quality_table) / sizeof(struct signal_penalty);
+
+	olsr_syslog(OLSR_LOG_ERR,"olsrd snr = %d\r\n",snr);
+	unsigned int i = 0;
+	uint8_t penalty = 0;
+
+	lq_vib_data = find_lq_nl80211_vib_by_mac(&lq_vib_list,lq_data);
+
+	if(lq_vib_data->cur_snr == 0){
+            lq_vib_data->cur_snr = snr;	
+	}else{
+            if((snr >= lq_vib_data->cur_snr + 20) || (snr >= lq_vib_data->cur_snr - 20)){
+	        lq_vib_data->hop_flag++;
+		if(lq_vib_data->hop_flag >= 3){
+	            lq_vib_data->cur_snr=snr;	
+		    lq_vib_data->hop_flag = 0;
+		}else{
+	            snr=lq_vib_data->cur_snr;	
+		}
+	    }else{
+	        if(lq_vib_data->hop_flag > 0){
+	            lq_vib_data->hop_flag=0;	
+		}
+		lq_vib_data->cur_snr = snr;
+	    }	
+	}
+
+	if(snr >= (signal_quality_table[0].signal + THRESHOLD_VIB)){
+		//olsr_syslog(OLSR_LOG_ERR,"olsrd snr debug 1\r\n");
+		lq_vib_data->threshold_sw = false;
+
+		return penalty;
+	}
+
+	if(((signal_quality_table[0].signal) < snr) && (snr < (signal_quality_table[0].signal + THRESHOLD_VIB))){
+		if(lq_vib_data->threshold_sw){
+		        //olsr_syslog(OLSR_LOG_ERR,"olsrd snr debug 2\r\n");
+			return signal_quality_table[0].penalty;
+		}else{
+			//olsr_syslog(OLSR_LOG_ERR,"olsrd snr debug 3\r\n");
+			return penalty;
+		}
+	}
+
+	for (i = 0; i < TABLE_SIZE; i++) {
+        	if (snr <= signal_quality_table[i].signal) {
+			penalty = signal_quality_table[i].penalty;
+			lq_vib_data->threshold_sw = true;
 		} else {
 			break;
 		}
@@ -450,6 +687,11 @@ void nl80211_link_info_get(void) {
 
 	uint8_t penalty_bandwidth;
 	uint8_t penalty_signal;
+
+	int8_t noise = 0;
+
+	nl80211_link_noise_for_interface(ifnet,&noise);
+	//olsr_syslog(OLSR_LOG_ERR,"olsrd noise = %d\r\n",noise);
 
 	// Get latest 802.11 status information for all interfaces
 	// This list will contain OLSR and non-OLSR nodes
@@ -472,16 +714,17 @@ void nl80211_link_info_get(void) {
 		if (mac_of_neighbor(link, mac_address)) {
 			if ((lq_data = find_lq_nl80211_data_by_mac(nl80211_list, mac_address)) != NULL) {
 				penalty_bandwidth = bandwidth_to_quality(lq_data->bandwidth);
-				penalty_signal = signal_to_quality(lq_data->signal);
+				//penalty_signal = signal_to_quality(lq_data->signal);
+				penalty_signal = snr_to_quality(lq_data,lq_data->signal,noise);
 
 				lq_ffeth->lq.valueBandwidth = penalty_bandwidth;
 				lq_ffeth->lq.valueRSSI = penalty_signal;
 				lq_ffeth->smoothed_lq.valueBandwidth = penalty_bandwidth;
 				lq_ffeth->smoothed_lq.valueRSSI = penalty_signal;
 
-				olsr_syslog(OLSR_LOG_INFO, "Apply 802.11: iface(%s) neighbor(%s) bandwidth(%dMb = %d) rssi(%ddBm = %d)",
-						link->if_name, ether_ntoa((struct ether_addr *)mac_address),
-						lq_data->bandwidth / 10, penalty_bandwidth, lq_data->signal, penalty_signal);
+				//olsr_syslog(OLSR_LOG_INFO, "Apply 802.11: iface(%s) neighbor(%s) bandwidth(%dMb = %d) rssi(%ddBm = %d)",
+				//		link->if_name, ether_ntoa((struct ether_addr *)mac_address),
+				//		lq_data->bandwidth / 10, penalty_bandwidth, lq_data->signal, penalty_signal);
 			} else
 				olsr_syslog(OLSR_LOG_INFO, "NO match ;-(!");
 		}

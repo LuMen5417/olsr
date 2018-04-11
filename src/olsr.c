@@ -76,6 +76,13 @@ bool changes_neighborhood;
 bool changes_hna;
 bool changes_force;
 
+#ifdef LINUX_NL80211
+#include "linux/nl80211_link_info.h"
+
+extern struct lq_nl80211_vib *lq_vib_list;
+#endif
+
+
 /*COLLECT startup sleeps caused by warnings*/
 
 #ifdef OLSR_COLLECT_STARTUP_SLEEP
@@ -557,6 +564,10 @@ olsr_status_to_string(uint8_t status)
 void
 olsr_exit(const char *msg, int val)
 {
+#ifdef LINUX_NL80211
+  free_lq_nl80211_vib(lq_vib_list);
+#endif
+
   OLSR_PRINTF(1, "OLSR EXIT: %s\n", msg);
   olsr_syslog(OLSR_LOG_ERR, "olsrd exit: %s\n", msg);
   fflush(stdout);

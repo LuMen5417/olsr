@@ -225,7 +225,7 @@ process_message_neighbors(struct neighbor_entry *neighbor, const struct hello_me
 
             // Only copy the link quality if it is better than what we have
             // for this 2-hop neighbor
-            if (new_path_linkcost < walker->path_linkcost) {
+            if (new_path_linkcost + (0.5+ 0.1*walker->path_linkcost) < walker->path_linkcost) {
               walker->second_hop_linkcost = new_second_hop_linkcost;
               walker->path_linkcost = new_path_linkcost;
 

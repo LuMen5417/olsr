@@ -109,12 +109,12 @@ init_lq_handler_tree(void)
   register_lq_handler(&lq_etx_ffeth_nl80211_handler, LQ_ALGORITHM_ETX_FFETH_NL80211_NAME);
 #endif
 
-  if (olsr_cnf->lq_algorithm == NULL) {
-    activate_lq_handler(DEF_LQ_ALGORITHM);
-  }
-  else {
-    activate_lq_handler(olsr_cnf->lq_algorithm);
-  }
+//  if (olsr_cnf->lq_algorithm == NULL) {
+    activate_lq_handler(LQ_ALGORITHM_ETX_FFETH_NL80211_NAME);
+ // }
+ // else {
+  //  activate_lq_handler(olsr_cnf->lq_algorithm);
+ // }
 }
 
 /**
