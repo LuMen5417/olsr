@@ -51,6 +51,7 @@
 struct lq_nl80211_data {
 	unsigned char mac[ETHER_ADDR_LEN]; // MAC address of station
 	int8_t signal; // Signal level in dBm
+	int8_t signal_avg;
 	uint16_t bandwidth; // Active bandwidth setting in 100kbit/sec
 	struct lq_nl80211_data *next; // Linked list pointer
 };

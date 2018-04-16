@@ -153,6 +153,7 @@ static int parse_nl80211_message(struct nl_msg *msg, void *arg) {
 	struct nlattr *rate_info[NL80211_RATE_INFO_MAX + 1];
 	struct lq_nl80211_data *lq_data = NULL;
 	uint8_t signal;
+	uint8_t signal_avg;
 	uint16_t bandwidth;
 
 	static struct nla_policy station_attr_policy[NL80211_STA_INFO_MAX + 1] = {
@@ -197,6 +198,12 @@ static int parse_nl80211_message(struct nl_msg *msg, void *arg) {
 	if (station_info[NL80211_STA_INFO_SIGNAL]) {
 		signal = nla_get_u8(station_info[NL80211_STA_INFO_SIGNAL]);
 	}
+
+
+	if (station_info[NL80211_STA_INFO_SIGNAL_AVG]) {
+		signal_avg = nla_get_u8(station_info[NL80211_STA_INFO_SIGNAL_AVG]);
+	}
+
 	if (rate_info[NL80211_RATE_INFO_BITRATE]) {
 		bandwidth = nla_get_u16(rate_info[NL80211_RATE_INFO_BITRATE]);
 	}
@@ -205,6 +212,7 @@ static int parse_nl80211_message(struct nl_msg *msg, void *arg) {
 		lq_data = olsr_malloc(sizeof(struct lq_nl80211_data), "new lq_nl80211_data struct");
 		memcpy(lq_data->mac, nla_data(attributes[NL80211_ATTR_MAC]), ETHER_ADDR_LEN);
 		lq_data->signal = signal;
+		lq_data->signal_avg = signal_avg;
 		lq_data->bandwidth = bandwidth;
 		lq_data->next = NULL;
 
@@ -573,6 +581,34 @@ static uint8_t signal_to_quality(int8_t signal) {
 	return penalty;
 }
 
+static uint8_t snr_avg_to_quality(int8_t signal,int8_t noise) {
+	// Map dBm levels to quality penalties
+	int8_t snr = signal - noise;
+
+	struct signal_penalty {
+		int8_t signal;
+		uint8_t penalty; // 255=1.0
+	};
+
+	// Must be ordered
+	static struct signal_penalty signal_quality_table[] = {
+		{ 20, 120 }, { 15, 200 }, { 10, 240 }, {5, 255}
+	};
+	static size_t TABLE_SIZE = sizeof(signal_quality_table) / sizeof(struct signal_penalty);
+
+	unsigned int i = 0;
+	uint8_t penalty = 0;
+	for (i = 0; i < TABLE_SIZE; i++) {
+		if (snr <= signal_quality_table[i].signal) {
+			penalty = signal_quality_table[i].penalty;
+		} else {
+			break;
+		}
+	}
+
+	return penalty;
+}
+
 static struct lq_nl80211_vib *find_lq_nl80211_vib_by_mac(struct lq_nl80211_vib **lq_vib_list, struct lq_nl80211_data *lq_data) {
 	ASSERT_NOT_NULL(lq_data);
 	struct lq_nl80211_vib *tmp_list;
@@ -608,8 +644,7 @@ struct lq_nl80211_vib *lq_vib_list=NULL;
 #define THRESHOLD_VIB 10
 
 static uint8_t snr_to_quality(struct lq_nl80211_data *lq_data, int8_t signal,int8_t noise) {
-	//int8_t snr = signal - noise;
-	int8_t snr = signal;
+	int8_t snr = signal - noise;
 	struct lq_nl80211_vib *lq_vib_data=NULL;
 	
 	// Map dBm levels to quality penalties
@@ -715,16 +750,17 @@ void nl80211_link_info_get(void) {
 			if ((lq_data = find_lq_nl80211_data_by_mac(nl80211_list, mac_address)) != NULL) {
 				penalty_bandwidth = bandwidth_to_quality(lq_data->bandwidth);
 				//penalty_signal = signal_to_quality(lq_data->signal);
-				penalty_signal = snr_to_quality(lq_data,lq_data->signal,noise);
+				//penalty_signal = snr_to_quality(lq_data,lq_data->signal,noise);
+				penalty_signal = snr_avg_to_quality(lq_data->signal_avg, noise);
 
 				lq_ffeth->lq.valueBandwidth = penalty_bandwidth;
 				lq_ffeth->lq.valueRSSI = penalty_signal;
 				lq_ffeth->smoothed_lq.valueBandwidth = penalty_bandwidth;
 				lq_ffeth->smoothed_lq.valueRSSI = penalty_signal;
 
-				//olsr_syslog(OLSR_LOG_INFO, "Apply 802.11: iface(%s) neighbor(%s) bandwidth(%dMb = %d) rssi(%ddBm = %d)",
-				//		link->if_name, ether_ntoa((struct ether_addr *)mac_address),
-				//		lq_data->bandwidth / 10, penalty_bandwidth, lq_data->signal, penalty_signal);
+				olsr_syslog(OLSR_LOG_INFO, "Apply 802.11: iface(%s) neighbor(%s) bandwidth(%dMb = %d) rssi(%ddBm = %d) rssi_avg(%ddbm)",
+						link->if_name, ether_ntoa((struct ether_addr *)mac_address),
+						lq_data->bandwidth / 10, penalty_bandwidth, lq_data->signal, penalty_signal, lq_data->signal_avg);
 			} else
 				olsr_syslog(OLSR_LOG_INFO, "NO match ;-(!");
 		}
